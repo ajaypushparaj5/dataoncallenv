@@ -1,7 +1,7 @@
 # tasks.py
-# Defines the 3 tasks — the scenario description the agent receives,
-# the ground truth root cause, and what a valid fix looks like.
-# The grader compares agent output against these ground truths.
+# Ground truth stored as canonical SQL queries.
+# Grader runs BOTH the agent's query AND the ground truth query,
+# then compares the actual result sets. No magic numbers. No string matching for SQL.
 
 TASKS = {
     1: {
@@ -17,36 +17,27 @@ You are a data analyst on-call. A Slack message just arrived:
 
 Available tables: sales, products, currency_rates, dbt_log
 
-Your goal: identify the root cause and write a SQL query that produces
-the correct total revenue in USD across all currencies.
+Your goal:
+1. Find the root cause of why non-USD revenue shows as $0
+2. Write a corrected SQL query that returns total revenue in USD across all currencies
+3. Call submit() with your full explanation AND your corrected SQL query
         """.strip(),
 
-        # What the agent must say to get diagnosis_correct = 0.30
-        # We check if any of these phrases appear in the agent's final answer
         "root_cause_keywords": [
-            "case mismatch",
-            "lowercase",
-            "uppercase",
-            "currency_code",
-            "null join",
-            "join fails",
-            "usd vs USD",
-            "case sensitive",
+            "case", "lowercase", "uppercase", "lower(", "upper(",
+            "currency_code", "null", "mismatch", "usd vs",
+            "case sensitive", "case-sensitive", "join fail", "not matching",
         ],
 
-        # A query that actually fixes the problem — we run this and compare output
-        "correct_fix_query": """
-            SELECT SUM(s.amount * cr.rate_to_usd) as total_revenue_usd
+        # This is the canonical correct answer.
+        # Grader runs this and stores the result, then compares agent's SQL result to it.
+        "ground_truth_query": """
+            SELECT ROUND(SUM(s.amount * cr.rate_to_usd), 2) as total_revenue_usd
             FROM sales s
-            JOIN currency_rates cr
-              ON LOWER(s.currency) = cr.currency_code
+            JOIN currency_rates cr ON LOWER(s.currency) = cr.currency_code
         """,
 
-        # The correct answer value — grader runs fix query and checks this
-        "expected_total_revenue": 2851.0,  # 500 + 450*1.08 + 300*1.27 + 600 + 200*1.08 + 800
-
-        # How many steps an expert analyst would need
-        "optimal_steps": 4,
+        "optimal_steps": 5,
     },
 
     2: {
@@ -62,85 +53,71 @@ You are a data analyst on-call. A Slack message just arrived:
 
 Available tables: user_events, dbt_log
 
-Hint: look at event timestamps around the month boundary.
-Your goal: identify the root cause and explain what happened to the numbers.
+Your goal:
+1. Find why MAU differs between January and February
+2. Find the root cause in the pipeline
+3. Call submit() with: your explanation AND a corrected query that counts MAU correctly
         """.strip(),
 
         "root_cause_keywords": [
-            "timezone",
-            "utc",
-            "local time",
-            "migration",
-            "double count",
-            "duplicate",
-            "boundary",
-            "jan 31",
-            "january 31",
-            "timestamp",
+            "timezone", "utc", "local time", "migration",
+            "double count", "duplicate", "boundary", "jan 31",
+            "timestamp", "tz_source", "twice", "counted twice",
         ],
 
-        "correct_fix_query": """
+        "ground_truth_query": """
             SELECT COUNT(DISTINCT user_id) as mau, substr(event_ts, 1, 7) as month
             FROM user_events
             WHERE tz_source = 'utc'
-               OR event_ts >= '2024-02-01'
             GROUP BY month
+            ORDER BY month
         """,
 
-        # Grader checks agent found the dbt_log entry about timezone migration
-        "smoking_gun": "Migrated timestamp handling from UTC to local timezone",
+        "smoking_gun_text": "Migrated timestamp handling from UTC to local timezone",
 
-        "optimal_steps": 6,
+        "optimal_steps": 7,
     },
 
     3: {
         "id": 3,
         "difficulty": "hard",
-        "title": "Cloud Storage Revenue Overstated by Exactly 3.7x",
+        "title": "Cloud Storage Revenue Overstated by Exactly 3–4x",
         "description": """
 You are a data analyst on-call. A Slack message just arrived:
 
-    "Something is very wrong. Cloud Storage revenue for January is showing
-     $5,920 but our finance team says actual bookings were about $1,500.
-     The ratio is suspiciously precise — almost exactly 3.7x overstated.
-     Other product lines look fine. This started last month."
+    "Something is very wrong. Revenue for our newer product lines
+     is showing 3–4x higher than actual bookings.
+     Other product lines look fine. This started after a schema
+     change about 6 weeks ago."
 
 Available tables: sales, products, product_promotions, dbt_log
 
-Your goal: identify exactly why the number is inflated and write a
-corrected query that returns the true revenue figure.
+Your goal:
+1. Find exactly why revenue is inflated for newer products
+2. Identify which table and join causes the multiplication
+3. Call submit() with: root cause + corrected SQL query
         """.strip(),
 
         "root_cause_keywords": [
-            "fanout",
-            "fan-out",
-            "non-unique",
-            "duplicate rows",
-            "product_promotions",
-            "multiple rows",
-            "join multiplies",
-            "not unique",
-            "one to many",
-            "cardinality",
+            "fanout", "fan-out", "fan out", "non-unique", "not unique",
+            "duplicate rows", "product_promotions", "multiple rows",
+            "join multiply", "multiply", "inflat", "promo",
+            "one to many", "cardinality", "several rows", "many rows",
         ],
 
-        "correct_fix_query": """
-            SELECT SUM(s.amount) as true_revenue
+        "ground_truth_query": """
+            SELECT ROUND(SUM(s.amount), 2) as true_revenue
             FROM sales s
-            WHERE s.product_id IN ('P003', 'P004')
+            WHERE s.product_id IN (
+                SELECT product_id FROM products WHERE launched_at >= '2023-11-01'
+            )
         """,
-
-        "expected_true_revenue": 1800.0,  # 700 + 800 + 300
-
-        # The precise multiplier — agent should mention this is a fanout signal
-        "fanout_ratio": 3.7,
 
         "optimal_steps": 8,
     }
 }
 
 def get_task(task_id: int) -> dict:
-    """Return task definition. Raises if task_id is invalid."""
     if task_id not in TASKS:
         raise ValueError(f"Task ID must be 1, 2, or 3. Got: {task_id}")
     return TASKS[task_id]

@@ -1,13 +1,7 @@
 # api/app.py
-# FastAPI server. Wraps the environment in HTTP endpoints.
-# The hackathon validator will ping these URLs to confirm your env works.
-#
-# Endpoints:
-#   POST /reset        — start a new episode
-#   POST /step         — send an action, get observation back
-#   GET  /state        — inspect current episode state
-#   GET  /health       — validator ping (must return 200)
-#   GET  /tasks        — list available tasks
+# Production FastAPI server.
+# The hackathon validator will hit /health, /reset, /step, /state.
+# All must return proper JSON and correct HTTP status codes.
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,7 +9,6 @@ from pydantic import BaseModel
 from typing import Optional
 import sys, os
 
-# Make sure Python can find our modules when running from /api
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models import Action, Observation, Reward, EnvState
@@ -24,11 +17,14 @@ from tasks import TASKS
 
 app = FastAPI(
     title="DataOnCallEnv",
-    description="RL environment for data pipeline debugging agents",
+    description=(
+        "RL environment for data pipeline debugging. "
+        "The agent acts as an on-call analyst debugging broken reports."
+    ),
     version="1.0.0",
+    docs_url="/docs",   # Swagger UI at /docs — useful for manual testing
 )
 
-# Allow cross-origin requests — needed for HuggingFace Spaces
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,14 +32,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# One environment instance per server process
-# In production with multiple workers, each worker has its own instance
+# One env instance per worker process
 env = DataOnCallEnv()
 
-# ── Request/Response models ────────────────────────────────────────────────────
+# ── Request bodies ────────────────────────────────────────────────────────────
 
 class ResetRequest(BaseModel):
-    task_id: int = 1  # defaults to task 1 if not specified
+    task_id: int = 1
 
 class StepRequest(BaseModel):
     tool: str
@@ -52,7 +47,7 @@ class StepRequest(BaseModel):
 
 class StepResponse(BaseModel):
     observation: Observation
-    reward: Optional[Reward] = None   # None until episode ends
+    reward: Optional[Reward] = None
     done: bool
     info: dict
 
@@ -60,18 +55,35 @@ class StepResponse(BaseModel):
 
 @app.get("/health")
 def health():
-    """Validator ping. Must return 200."""
-    return {"status": "ok", "env": "DataOnCallEnv", "version": "1.0.0"}
+    """Validator ping. Returns 200 with env metadata."""
+    return {
+        "status":  "ok",
+        "env":     "DataOnCallEnv",
+        "version": "1.0.0",
+        "tasks":   [1, 2, 3],
+        "spec":    "openenv-0.1",
+    }
+
+@app.get("/")
+def root():
+    """Root redirect info."""
+    return {
+        "name":      "DataOnCallEnv",
+        "docs":      "/docs",
+        "health":    "/health",
+        "endpoints": ["/reset", "/step", "/state", "/tasks"],
+    }
 
 @app.get("/tasks")
 def list_tasks():
-    """Return metadata about all 3 tasks."""
+    """List all available tasks with metadata."""
     return {
         "tasks": [
             {
-                "id": t["id"],
-                "difficulty": t["difficulty"],
-                "title": t["title"],
+                "id":          t["id"],
+                "difficulty":  t["difficulty"],
+                "title":       t["title"],
+                "optimal_steps": t["optimal_steps"],
             }
             for t in TASKS.values()
         ]
@@ -80,8 +92,8 @@ def list_tasks():
 @app.post("/reset", response_model=Observation)
 def reset(req: ResetRequest):
     """
-    Start a fresh episode.
-    Rebuilds the database and returns the scenario description.
+    Start a fresh episode for the given task_id (1, 2, or 3).
+    Returns the initial observation containing the scenario description.
     """
     try:
         obs = env.reset(task_id=req.task_id)
@@ -92,25 +104,34 @@ def reset(req: ResetRequest):
 @app.post("/step", response_model=StepResponse)
 def step(req: StepRequest):
     """
-    Send one agent action. Returns observation and reward (if episode ended).
+    Send one agent action. Returns observation + reward (if done).
+    Call POST /reset first.
     """
     if env.task_id is None:
         raise HTTPException(
             status_code=400,
-            detail="Environment not initialized. Call POST /reset first."
+            detail="Not initialized. Call POST /reset first."
         )
     if env.done:
         raise HTTPException(
             status_code=400,
-            detail="Episode is over. Call POST /reset to start a new episode."
+            detail="Episode over. Call POST /reset to start a new episode."
         )
 
-    action = Action(tool=req.tool, query=req.query, reasoning=req.reasoning)
-    obs, reward, done, info = env.step(action)
+    action = Action(
+        tool=req.tool,
+        query=req.query,
+        reasoning=req.reasoning,
+    )
+
+    try:
+        obs, reward, done, info = env.step(action)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
     return StepResponse(observation=obs, reward=reward, done=done, info=info)
 
 @app.get("/state", response_model=EnvState)
 def state():
-    """Return the full current episode state."""
+    """Return full current episode state."""
     return env.state()

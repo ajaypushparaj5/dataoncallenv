@@ -1,0 +1,84 @@
+# openenv.yaml
+# Required by the OpenEnv spec validator.
+# This file describes your environment to the Hub.
+
+name: dataoncallenv
+version: "1.0.0"
+description: >
+  RL environment for data pipeline debugging agents. The agent acts as an
+  on-call data analyst investigating broken reports — diagnosing root causes
+  across three realistic bug scenarios: a silent null join, a timezone
+  double-counting ghost, and a fanout inflation bug.
+
+domain: data-engineering
+author: your-hf-username
+
+tasks:
+  - id: 1
+    difficulty: easy
+    title: "Weekly revenue report shows $0 for international sales"
+    description: "Silent NULL JOIN caused by currency code case mismatch"
+    optimal_steps: 4
+
+  - id: 2
+    difficulty: medium
+    title: "Monthly active users dropped 8% on Feb 1st"
+    description: "Timezone migration caused double-counting at month boundary"
+    optimal_steps: 6
+
+  - id: 3
+    difficulty: hard
+    title: "Cloud Storage revenue overstated by exactly 3.7x"
+    description: "Fanout bug from non-unique JOIN key in product_promotions"
+    optimal_steps: 8
+
+observation_space:
+  task_id: integer
+  result: any         # tool output — rows, schema, logs, or error
+  steps_taken: integer
+  done: boolean
+  max_steps: integer
+
+action_space:
+  tool: string        # run_sql | inspect_schema | check_logs | diff_report | list_tables | submit
+  query: string
+  reasoning: string   # optional — rewarded by grader
+
+reward_range: [0.0, 1.0]
+
+reward_components:
+  - name: diagnosis_correct
+    max: 0.30
+    description: Agent correctly identifies root cause
+  - name: fix_valid
+    max: 0.25
+    description: Agent's proposed fix query returns correct output
+  - name: efficiency
+    max: 0.20
+    description: Inverse of steps taken vs optimal steps
+  - name: reasoning_quality
+    max: 0.15
+    description: Fraction of actions that include reasoning field
+  - name: false_positive_penalty
+    max: -0.20
+    description: Penalty for destructive or irrelevant queries
+
+baseline_scores:
+  task_1: 0.72
+  task_2: 0.51
+  task_3: 0.28
+
+tags:
+  - openenv
+  - data-engineering
+  - sql
+  - debugging
+  - real-world
+  - agentic
+
+endpoints:
+  health: GET /health
+  reset:  POST /reset
+  step:   POST /step
+  state:  GET /state
+  tasks:  GET /tasks

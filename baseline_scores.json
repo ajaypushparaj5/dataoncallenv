@@ -1,0 +1,35 @@
+[
+  {
+    "task_id": 1,
+    "score": 0.53,
+    "steps_taken": 10,
+    "breakdown": {
+      "diagnosis_correct": 0.3,
+      "fix_valid": 0.0,
+      "efficiency": 0.08,
+      "reasoning_quality": 0.15
+    }
+  },
+  {
+    "task_id": 2,
+    "score": 0.55,
+    "steps_taken": 8,
+    "breakdown": {
+      "diagnosis_correct": 0.0,
+      "fix_valid": 0.25,
+      "efficiency": 0.15,
+      "reasoning_quality": 0.15
+    }
+  },
+  {
+    "task_id": 3,
+    "score": 0.31,
+    "steps_taken": 10,
+    "breakdown": {
+      "diagnosis_correct": 0.0,
+      "fix_valid": 0.0,
+      "efficiency": 0.16,
+      "reasoning_quality": 0.15
+    }
+  }
+]
