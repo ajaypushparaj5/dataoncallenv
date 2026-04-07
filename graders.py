@@ -1,5 +1,5 @@
 # graders.py
-# Production-grade graders. Key design decisions:
+# Production-grade graders. Key design decisions::
 #
 # 1. fix_valid: runs agent's SQL against the real db and compares result SET
 #    to ground truth query result. No magic numbers. Works for any correct query.
