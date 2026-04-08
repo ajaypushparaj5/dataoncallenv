@@ -3,9 +3,9 @@ Includes diagnosis, fix validation, efficiency, and quality scoring.
 """
 
 import re
-from .models import Reward, RewardBreakdown
-from .tasks import get_task
-from .database import run_sql
+from models import Reward, RewardBreakdown
+from tasks import get_task
+from database import run_sql
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 

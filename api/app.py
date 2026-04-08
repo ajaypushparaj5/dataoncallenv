@@ -6,9 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
-from ..models import Action, Observation, Reward, EnvState
-from ..environment import DataOnCallEnv
-from ..tasks import TASKS
+from models import Action, Observation, Reward, EnvState
+from environment import DataOnCallEnv
+from tasks import TASKS
 
 app = FastAPI(
     title="DataOnCallEnv",

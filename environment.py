@@ -1,10 +1,10 @@
 """Main RL Environment implementation for DataOnCallEnv.
 """
 
-from .models import Action, Observation, Reward, EnvState
-from .tasks import get_task
-from .graders import grade
-from .database import (
+from models import Action, Observation, Reward, EnvState
+from tasks import get_task
+from graders import grade
+from database import (
     build_task1_db, build_task2_db, build_task3_db,
     run_sql, inspect_schema, check_logs, check_airflow,
     diff_report, list_tables

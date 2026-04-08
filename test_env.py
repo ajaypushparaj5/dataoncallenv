@@ -7,8 +7,8 @@ import json
 # Ensure project root is on path
 sys.path.insert(0, ".")
 
-from dataoncallenv.environment import DataOnCallEnv
-from dataoncallenv.models import Action, Observation, Reward
+from environment import DataOnCallEnv
+from models import Action, Observation, Reward
 
 passed = 0
 failed = 0
