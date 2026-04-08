@@ -11,58 +11,46 @@ tags:
 
 # DataOnCallEnv
 
-Every data team has a 3am Slack message: *"the numbers look wrong."*  
-**DataOnCallEnv** is an RL benchmark for the debugging workflow that follows — hypothesis, query, trace, fix — evaluated against real root causes planted in a synthetic but realistic data stack.
+An RL benchmark that simulates the workflow of an on-call data analyst debugging broken reports. The agent investigates realistic data pipeline bugs across three difficulty tiers — diagnosing root causes, writing corrected SQL, and earning a multi-dimensional reward score.
 
----
+## Why This Exists
 
-## Why this environment exists
+AI agents are being deployed as data analysts. But there is no benchmark that measures whether these agents can actually debug — not just query. DataOnCallEnv fills that gap by simulating exactly the workflow a real on-call analyst performs, scored against deterministic ground truth.
 
-AI agents are being deployed as data analysts. Companies like Airbnb, Stripe, and every fintech team are building agents that monitor pipelines and investigate anomalies. But there is no benchmark that measures whether these agents can actually *debug* — not just query.
-
-DataOnCallEnv fills that gap. It simulates exactly the workflow a real on-call analyst performs, scored against deterministic ground truth.
-
----
-
-## Key Features (v2.0)
+## Features
 
 | Feature | Description |
 |---------|-------------|
-| **Partial Observability** | Tables are hidden at reset. Agent must call `list_tables()` to discover what's available before inspecting or querying. |
-| **Query Cost Budget** | Each tool has a fixed cost (e.g., `run_sql`=2.0). Total budget: 20.0 per episode. Forces efficient investigation. |
-| **Realistic Logs** | Expanded dbt pipeline logs (8-15 rows per task) with noise entries + Airflow DAG run history. |
-| **Anti-Cheat** | `SELECT *` blocked, results capped at 50 rows, minimum 2 tool calls before submit, memorized-answer detection. |
-| **Tiered Evaluation** | Diagnosis scored by depth of understanding (exact/category/symptom), not binary. Investigation quality bonus. |
+| Partial Observability | Tables are hidden at reset. Agent must call `list_tables()` to discover schema before inspecting or querying. |
+| Query Cost Budget | Each tool has a fixed cost (`run_sql`=2.0, `inspect_schema`=1.0, etc). Total budget: 20.0 per episode. |
+| Realistic Logs | Expanded dbt pipeline logs (8–15 rows per task) with noise entries + Airflow DAG run history table. |
+| Anti-Cheat | `SELECT *` blocked, results capped at 50 rows, minimum 2 tool calls before submit, memorized-answer detection. |
+| Tiered Evaluation | Diagnosis scored by depth of understanding (exact → category → symptom), not binary pass/fail. |
+| Deterministic | All tasks and grading are fully deterministic. Same actions always produce the same score. |
 
----
+## Tasks
 
-## Environment description
+| ID | Difficulty | Title | Root Cause | Optimal Steps | Optimal Cost |
+|----|-----------|-------|------------|---------------|-------------|
+| 1 | Easy | Revenue shows $0 for international sales | Currency code casing mismatch (`USD` vs `usd`) causes silent NULL JOIN | 5 | 7.0 |
+| 2 | Medium | MAU dropped 8% on Feb 1st | UTC→local timezone migration double-counts events at month boundary | 7 | 10.0 |
+| 3 | Hard | Cloud Storage revenue overstated by 3.7x | Non-unique key in `product_promotions` causes fanout on JOIN | 8 | 13.0 |
 
-The agent receives a stakeholder Slack message describing a broken report. It has access to a SQLite database (sales, products, pipeline logs, Airflow runs) and a set of tools to investigate. It must diagnose the root cause and propose a corrected query — without being told where the bug is or even what tables exist.
+## Action Space
 
-**State:** The current task scenario, tool results accumulated so far, steps remaining, cost budget remaining, and discovered tables.  
-**Episode:** Ends when the agent calls `submit()`, exhausts its 15-step budget, or spends its 20.0 cost budget.  
-**Reward:** Multi-dimensional — diagnosis accuracy (tiered), fix correctness, efficiency (steps + cost), reasoning quality, investigation methodology, minus penalties.
+Every action has `tool`, `query`, and an optional `reasoning` field (rewarded by the grader).
 
----
-
-## Action space
-
-| Tool | Query format | Cost | Description |
+| Tool | Query Format | Cost | Description |
 |------|-------------|------|-------------|
-| `list_tables` | *(empty)* | 0.5 | Discover all available tables (START HERE) |
-| `inspect_schema` | Table name | 1.0 | See column names and types (table must be discovered first) |
-| `check_logs` | *(empty)* | 1.0 | Read the dbt pipeline changelog |
-| `check_airflow` | *(empty)* | 1.0 | Read Airflow DAG run history |
-| `run_sql` | SQL SELECT string | 2.0 | Execute a query (no SELECT *, must specify columns) |
-| `diff_report` | `"date1,date2"` | 1.5 | Compare report output between two dates |
-| `submit` | Your answer string | 0.0 | Submit root cause + fix. Ends episode. |
+| `list_tables` | `""` | 0.5 | Discover available tables (must be called first) |
+| `inspect_schema` | `"table_name"` | 1.0 | Column names and types for a discovered table |
+| `check_logs` | `""` | 1.0 | dbt pipeline changelog (ordered by most recent) |
+| `check_airflow` | `""` | 1.0 | Airflow DAG run history |
+| `run_sql` | `"SELECT col FROM ..."` | 2.0 | Execute a SELECT query (no `SELECT *`) |
+| `diff_report` | `"date1,date2"` | 1.5 | Compare revenue totals between two dates |
+| `submit` | `"ROOT CAUSE: ... CORRECTED SQL: ..."` | 0.0 | Submit diagnosis and fix. Ends episode. |
 
-Optional field on every action: `reasoning` — the agent's explanation of *why* it is making this call. The grader rewards agents that explain their thinking.
-
----
-
-## Observation space
+## Observation Space
 
 ```json
 {
@@ -76,54 +64,50 @@ Optional field on every action: `reasoning` — the agent's explanation of *why*
 }
 ```
 
----
+## Reward Function
 
-## Tasks
+| Component | Range | Description |
+|-----------|-------|-------------|
+| `diagnosis_correct` | 0.00–0.25 | Tiered: exact root cause (0.25), category match (0.15), symptom only (0.08) |
+| `fix_valid` | 0.00–0.25 | Agent's proposed SQL returns correct output vs ground truth |
+| `efficiency` | 0.00–0.15 | Combined step + cost efficiency relative to optimal |
+| `reasoning_quality` | 0.00–0.10 | Fraction of actions that include a reasoning field |
+| `investigation_quality` | 0.00–0.10 | Logical methodology: discovery → schema → logs → hypothesis → verify |
+| `false_positive_penalty` | 0.00–0.15 | Deducted for irrelevant table access, duplicate queries, or cheating |
 
-### Task 1 — Easy: Silent NULL JOIN
-**Scenario:** Weekly revenue report shows $0 for all international sales. USD sales are fine.  
-**Root cause:** `currency_rates` table stores codes as `"usd"` but `sales` table uses `"USD"`. The JOIN silently returns NULLs — no error in the pipeline logs.  
-**Optimal steps:** 5 | **Optimal cost:** 7.0
+**Total: 0.0–1.0** (dense reward — every action contributes signal)
 
-### Task 2 — Medium: Timezone Ghost
-**Scenario:** Monthly active users dropped 8% on February 1st. Nothing changed in the product.  
-**Root cause:** Pipeline migrated from UTC to local time on Jan 31. Events near midnight were double-counted in January and missed in February. The migration is recorded in `dbt_log`.  
-**Optimal steps:** 7 | **Optimal cost:** 10.0
+## API Endpoints
 
-### Task 3 — Hard: Fanout Inflation
-**Scenario:** Cloud Storage revenue is overstated by exactly 3.7x. Other product lines are fine.  
-**Root cause:** `product_promotions` table has 3–4 rows per product (non-unique key). A JOIN multiplies every sale row by the number of promo rows.  
-**Optimal steps:** 8 | **Optimal cost:** 13.0
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Health check, returns env metadata and version |
+| `GET` | `/` | Root info with available endpoints |
+| `GET` | `/tasks` | List all tasks with metadata |
+| `GET` | `/state` | Full current episode state |
+| `GET` | `/docs` | Interactive Swagger UI |
+| `POST` | `/reset` | Start a fresh episode. Body: `{"task_id": 1}` |
+| `POST` | `/step` | Send one action. Body: `{"tool": "...", "query": "...", "reasoning": "..."}` |
 
----
+## Setup
 
-## Reward function
+### Prerequisites
 
-```
-score = diagnosis_correct     (0.00–0.25)   # tiered: exact/category/symptom
-      + fix_valid              (0.00–0.25)   # proposed fix returns correct output
-      + efficiency             (0.00–0.15)   # step efficiency + cost efficiency
-      + reasoning_quality      (0.00–0.10)   # fraction of actions with reasoning
-      + investigation_quality  (0.00–0.10)   # logical debugging methodology
-      - false_positive_penalty (0.00–0.15)   # irrelevant tables, duplicates, cheating
-```
+- Python 3.10+
+- pip
 
-Reward is dense — every step contributes signal. An agent that diagnoses correctly but writes a broken fix scores ~0.55, not 0 or 1.
-
----
-
-## Setup and usage
-
-### Run locally
+### Install and Run Locally
 
 ```bash
-git clone https://huggingface.co/spaces/your-username/dataoncallenv
+git clone https://github.com/ajaypushparaj5/dataoncallenv.git
 cd dataoncallenv
 pip install -r requirements.txt
+
+# Start the API server
 uvicorn api.app:app --reload --port 8000
 ```
 
-### Quick API test
+### Quick API Test
 
 ```bash
 # Health check
@@ -134,50 +118,100 @@ curl -X POST http://localhost:8000/reset \
   -H "Content-Type: application/json" \
   -d '{"task_id": 1}'
 
-# Discover tables first (partial observability)
+# Discover tables
 curl -X POST http://localhost:8000/step \
   -H "Content-Type: application/json" \
-  -d '{"tool": "list_tables", "query": "", "reasoning": "Need to discover what tables exist"}'
+  -d '{"tool": "list_tables", "query": "", "reasoning": "Discover available tables"}'
 
-# Inspect a table
+# Inspect schema
 curl -X POST http://localhost:8000/step \
   -H "Content-Type: application/json" \
   -d '{"tool": "inspect_schema", "query": "sales", "reasoning": "Check sales table structure"}'
 ```
 
-### Run Docker
+### Run with Docker
 
 ```bash
 docker build -t dataoncallenv .
 docker run -p 7860:7860 dataoncallenv
 ```
 
-### Run baseline inference
+### Run Baseline Inference
+
+Requires an API key for an OpenAI-compatible inference provider.
 
 ```bash
-export HF_TOKEN="your_hf_token"
-export API_BASE_URL="https://router.huggingface.co/v1"
-export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
+# Create .env file
+cat > .env << EOF
+HF_TOKEN=your_hf_token_here
+API_BASE_URL=https://router.huggingface.co/v1
+MODEL_NAME=Qwen/Qwen2.5-72B-Instruct
+EOF
+
 python inference.py
 ```
 
----
+### Run Tests
 
-## Project structure
+```bash
+python test_env.py
+# Expected: 36 passed, 0 failed
+```
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `HF_TOKEN` | Yes | — | Hugging Face API token (used as `OPENAI_API_KEY`) |
+| `API_BASE_URL` | No | `https://router.huggingface.co/v1` | OpenAI-compatible inference endpoint |
+| `MODEL_NAME` | No | `Qwen/Qwen2.5-72B-Instruct` | Model identifier for the inference provider |
+
+## Hugging Face Spaces Deployment
+
+1. Create a new Space on [huggingface.co/new-space](https://huggingface.co/new-space)
+2. Select **Docker** as the SDK
+3. Upload the project files (or connect via Git)
+4. Add `HF_TOKEN` as a secret in Space Settings
+5. The Space will auto-build using the `Dockerfile` and expose the API on port 7860
+
+## Project Structure
 
 ```
 dataoncallenv/
-├── models.py        # Pydantic types: Action, Observation, Reward, EnvState
-├── database.py      # SQLite builder + tool implementations + anti-cheat
-├── tasks.py         # Task definitions with ground truth + diagnosis tiers
-├── graders.py       # Tiered scoring, investigation quality, penalties
-├── environment.py   # Core env: partial obs, query costs, anti-cheat
+├── models.py          # Pydantic types: Action, Observation, Reward, EnvState
+├── tasks.py           # Task definitions with ground truth and diagnosis tiers
+├── database.py        # SQLite database builder, tool implementations, anti-cheat
+├── environment.py     # Core RL env: partial obs, query costs, step/reset/state
+├── graders.py         # Tiered scoring, investigation quality, penalties
+├── inference.py       # Baseline agent using OpenAI-compatible API
+├── test_env.py        # 36 integration tests
 ├── api/
-│   └── app.py       # FastAPI server
-├── inference.py     # OpenAI agent baseline
-├── test_env.py      # Integration tests
-├── openenv.yaml     # OpenEnv spec metadata
-├── Dockerfile
-├── requirements.txt
-└── README.md
+│   └── app.py         # FastAPI server with /health, /reset, /step, /state
+├── openenv.yaml       # OpenEnv spec metadata
+├── Dockerfile         # HF Spaces container (port 7860)
+├── requirements.txt   # Python dependencies
+├── baseline_scores.json  # Reproducible baseline results
+└── .env               # API credentials (not committed)
 ```
+
+## OpenEnv Spec
+
+This environment implements the full [OpenEnv](https://github.com/open-env/openenv) specification:
+- Typed Pydantic models for `Action`, `Observation`, `Reward`, and `EnvState`
+- `reset()` / `step()` / `state()` API
+- `openenv.yaml` with full metadata
+- Minimum 3 tasks with agent graders (easy → medium → hard)
+- Scores in range 0.0–1.0 with partial progress signals
+- Deterministic evaluation
+- Baseline inference script with reproducible scores
+
+## Anti-Cheat Constraints
+
+| Constraint | Effect |
+|------------|--------|
+| `SELECT *` blocked | Agent must specify columns explicitly |
+| Row cap (50) | Large result dumps are truncated |
+| Min 2 tools before submit | Prevents skipping investigation |
+| Memorized-answer detection | Correct diagnosis without investigation incurs penalty |
+| Duplicate query penalty | Repeated identical queries are penalized |
+| Irrelevant table penalty | Accessing tables unrelated to the task is penalized |
