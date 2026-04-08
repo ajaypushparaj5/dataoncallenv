@@ -6,8 +6,8 @@ import json
 import time
 import httpx
 from openai import OpenAI, APIStatusError
-from dataoncallenv.environment import DataOnCallEnv
-from dataoncallenv.models import Action
+from environment import DataOnCallEnv
+from models import Action
 from dotenv import load_dotenv
 load_dotenv()
 

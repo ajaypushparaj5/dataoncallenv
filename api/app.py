@@ -95,7 +95,7 @@ def list_tasks():
     }
 
 @app.post("/reset", response_model=Observation)
-def reset(req: ResetRequest):
+def reset(req: ResetRequest= ResetRequest()):
     """
     Start a fresh episode for the given task_id (1, 2, or 3).
     Returns the initial observation containing the scenario description.
@@ -106,6 +106,10 @@ def reset(req: ResetRequest):
         return obs
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/web")
+def web():
+    return {"status": "ok"}
 
 @app.post("/step", response_model=StepResponse)
 def step(req: StepRequest):
@@ -143,7 +147,7 @@ def state():
     return env.state()
 def main():
     import uvicorn
-    uvicorn.run("dataoncallenv.api.app:app", host="0.0.0.0", port=7860, reload=True)
+    uvicorn.run("api.app:app", host="0.0.0.0", port=7860)
 
 if __name__ == "__main__":
     main()

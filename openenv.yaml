@@ -13,7 +13,7 @@ description: >
 
 domain: data-engineering
 author: RLBenchmarkingTeam
-
+entrypoint: api.app:app
 tasks:
   - id: 1
     difficulty: easy
