@@ -1,7 +1,5 @@
-# tasks.py
-# Ground truth stored as canonical SQL queries.
-# Grader runs BOTH the agent's query AND the ground truth query,
-# then compares the actual result sets. No magic numbers. No string matching for SQL.
+"""Task definitions and ground truth for DataOnCallEnv.
+"""
 
 TASKS = {
     1: {
@@ -15,8 +13,6 @@ You are a data analyst on-call. A Slack message just arrived:
      USD sales look fine. The pipeline ran successfully this morning.
      Can you investigate?"
 
-Available tables: sales, products, currency_rates, dbt_log
-
 Your goal:
 1. Find the root cause of why non-USD revenue shows as $0
 2. Write a corrected SQL query that returns total revenue in USD across all currencies
@@ -29,8 +25,20 @@ Your goal:
             "case sensitive", "case-sensitive", "join fail", "not matching",
         ],
 
-        # This is the canonical correct answer.
-        # Grader runs this and stores the result, then compares agent's SQL result to it.
+
+        # Grading tiers
+        "diagnosis_tiers": {
+            "exact": ["case sensitive", "case-sensitive", "lower(", "upper(", "lowercase", "uppercase"],
+            "category": ["mismatch", "join fail", "not matching", "null", "currency"],
+            "symptom": ["$0", "zero", "missing", "no rows"],
+        },
+
+
+        # Tables relevant to investigation (used for penalties)
+        "relevant_tables": ["sales", "currency_rates", "products", "dbt_log", "airflow_runs"],
+
+
+        # Canonical solution
         "ground_truth_query": """
             SELECT ROUND(SUM(s.amount * cr.rate_to_usd), 2) as total_revenue_usd
             FROM sales s
@@ -38,6 +46,7 @@ Your goal:
         """,
 
         "optimal_steps": 5,
+        "optimal_cost": 7.0,  # list_tables(0.5) + 2×inspect_schema(2.0) + check_logs(1.0) + run_sql(2.0) + submit(0) + verify(1.5)
     },
 
     2: {
@@ -51,8 +60,6 @@ You are a data analyst on-call. A Slack message just arrived:
      questions. January looked great. Nothing changed in the product.
      The pipeline ran fine. What happened?"
 
-Available tables: user_events, dbt_log
-
 Your goal:
 1. Find why MAU differs between January and February
 2. Find the root cause in the pipeline
@@ -65,6 +72,14 @@ Your goal:
             "timestamp", "tz_source", "twice", "counted twice",
         ],
 
+        "diagnosis_tiers": {
+            "exact": ["timezone", "utc", "local time", "migration", "tz_source"],
+            "category": ["double count", "duplicate", "boundary", "counted twice"],
+            "symptom": ["drop", "fewer", "missing users", "jan 31"],
+        },
+
+        "relevant_tables": ["user_events", "dbt_log", "airflow_runs"],
+
         "ground_truth_query": """
             SELECT COUNT(DISTINCT user_id) as mau, substr(event_ts, 1, 7) as month
             FROM user_events
@@ -76,6 +91,7 @@ Your goal:
         "smoking_gun_text": "Migrated timestamp handling from UTC to local timezone",
 
         "optimal_steps": 7,
+        "optimal_cost": 10.0,
     },
 
     3: {
@@ -90,7 +106,7 @@ You are a data analyst on-call. A Slack message just arrived:
      Other product lines look fine. This started after a schema
      change about 6 weeks ago."
 
-Available tables: sales, products, product_promotions, dbt_log
+Available tables: You must discover them first.
 
 Your goal:
 1. Find exactly why revenue is inflated for newer products
@@ -105,6 +121,15 @@ Your goal:
             "one to many", "cardinality", "several rows", "many rows",
         ],
 
+        "diagnosis_tiers": {
+            "exact": ["fanout", "fan-out", "fan out", "non-unique", "not unique",
+                      "cardinality", "one to many", "product_promotions"],
+            "category": ["duplicate rows", "multiple rows", "multiply", "inflat", "promo"],
+            "symptom": ["3.", "4.", "overstated", "inflated", "higher"],
+        },
+
+        "relevant_tables": ["sales", "products", "product_promotions", "dbt_log", "airflow_runs"],
+
         "ground_truth_query": """
             SELECT ROUND(SUM(s.amount), 2) as true_revenue
             FROM sales s
@@ -114,6 +139,7 @@ Your goal:
         """,
 
         "optimal_steps": 8,
+        "optimal_cost": 13.0,
     }
 }
 

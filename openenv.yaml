@@ -3,44 +3,50 @@
 # This file describes your environment to the Hub.
 
 name: dataoncallenv
-version: "1.0.0"
+version: "2.0.0"
 description: >
   RL environment for data pipeline debugging agents. The agent acts as an
   on-call data analyst investigating broken reports — diagnosing root causes
-  across three realistic bug scenarios: a silent null join, a timezone
-  double-counting ghost, and a fanout inflation bug.
+  across three realistic bug scenarios. Features: partial observability
+  (tables must be discovered), query cost budgets, realistic dbt/Airflow logs,
+  anti-cheat constraints, and tiered evaluation with investigation quality scoring.
 
 domain: data-engineering
-author: your-hf-username
+author: RLBenchmarkingTeam
 
 tasks:
   - id: 1
     difficulty: easy
     title: "Weekly revenue report shows $0 for international sales"
     description: "Silent NULL JOIN caused by currency code case mismatch"
-    optimal_steps: 4
+    optimal_steps: 5
+    optimal_cost: 7.0
 
   - id: 2
     difficulty: medium
     title: "Monthly active users dropped 8% on Feb 1st"
     description: "Timezone migration caused double-counting at month boundary"
-    optimal_steps: 6
+    optimal_steps: 7
+    optimal_cost: 10.0
 
   - id: 3
     difficulty: hard
     title: "Cloud Storage revenue overstated by exactly 3.7x"
     description: "Fanout bug from non-unique JOIN key in product_promotions"
     optimal_steps: 8
+    optimal_cost: 13.0
 
 observation_space:
   task_id: integer
-  result: any         # tool output — rows, schema, logs, or error
+  result: any
   steps_taken: integer
   done: boolean
   max_steps: integer
+  cost_spent: float
+  budget_remaining: float
 
 action_space:
-  tool: string        # run_sql | inspect_schema | check_logs | diff_report | list_tables | submit
+  tool: string    # run_sql | inspect_schema | check_logs | check_airflow | diff_report | list_tables | submit
   query: string
   reasoning: string   # optional — rewarded by grader
 
@@ -48,25 +54,30 @@ reward_range: [0.0, 1.0]
 
 reward_components:
   - name: diagnosis_correct
-    max: 0.30
-    description: Agent correctly identifies root cause
+    max: 0.25
+    description: "Tiered: exact root cause (0.25), category match (0.15), symptom only (0.08)"
   - name: fix_valid
     max: 0.25
-    description: Agent's proposed fix query returns correct output
+    description: "Agent's proposed fix query returns correct output vs ground truth"
   - name: efficiency
-    max: 0.20
-    description: Inverse of steps taken vs optimal steps
-  - name: reasoning_quality
     max: 0.15
-    description: Fraction of actions that include reasoning field
+    description: "Combined step efficiency + cost efficiency vs optimal"
+  - name: reasoning_quality
+    max: 0.10
+    description: "Fraction of actions that include reasoning field"
+  - name: investigation_quality
+    max: 0.10
+    description: "Logical debugging methodology: discovery → schema → logs → hypothesis → verify"
   - name: false_positive_penalty
-    max: -0.20
-    description: Penalty for destructive or irrelevant queries
+    max: -0.15
+    description: "Penalty for irrelevant table access, duplicate queries, or memorized answers"
 
-baseline_scores:
-  task_1: 0.72
-  task_2: 0.51
-  task_3: 0.28
+features:
+  - partial_observability: "Tables hidden until agent calls list_tables()"
+  - query_costs: "Each tool has a fixed cost; total budget 20.0 per episode"
+  - realistic_logs: "Expanded dbt logs + Airflow DAG run history with noise entries"
+  - anti_cheat: "SELECT * blocked, results capped at 50 rows, min 2 steps before submit"
+  - tiered_evaluation: "Diagnosis scored by depth of understanding, not binary"
 
 tags:
   - openenv
@@ -75,6 +86,7 @@ tags:
   - debugging
   - real-world
   - agentic
+  - partial-observability
 
 endpoints:
   health: GET /health

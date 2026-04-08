@@ -1,7 +1,5 @@
-# api/app.py
-# Production FastAPI server.
-# The hackathon validator will hit /health, /reset, /step, /state.
-# All must return proper JSON and correct HTTP status codes.
+"""FastAPI entry point for DataOnCallEnv.
+"""
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,10 +17,12 @@ app = FastAPI(
     title="DataOnCallEnv",
     description=(
         "RL environment for data pipeline debugging. "
-        "The agent acts as an on-call analyst debugging broken reports."
+        "The agent acts as an on-call analyst debugging broken reports. "
+        "Features: partial observability, query costs, realistic logs, "
+        "anti-cheat constraints, and tiered evaluation."
     ),
-    version="1.0.0",
-    docs_url="/docs",   # Swagger UI at /docs — useful for manual testing
+    version="2.0.0",
+    docs_url="/docs",
 )
 
 app.add_middleware(
@@ -35,7 +35,7 @@ app.add_middleware(
 # One env instance per worker process
 env = DataOnCallEnv()
 
-# ── Request bodies ────────────────────────────────────────────────────────────
+# Models
 
 class ResetRequest(BaseModel):
     task_id: int = 1
@@ -51,17 +51,24 @@ class StepResponse(BaseModel):
     done: bool
     info: dict
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+# Endpoints
 
 @app.get("/health")
 def health():
-    """Validator ping. Returns 200 with env metadata."""
+    """Health check endpoint for the environment."""
     return {
         "status":  "ok",
         "env":     "DataOnCallEnv",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "tasks":   [1, 2, 3],
         "spec":    "openenv-0.1",
+        "features": [
+            "partial_observability",
+            "query_costs",
+            "realistic_logs",
+            "anti_cheat",
+            "tiered_evaluation",
+        ],
     }
 
 @app.get("/")
@@ -80,10 +87,11 @@ def list_tasks():
     return {
         "tasks": [
             {
-                "id":          t["id"],
-                "difficulty":  t["difficulty"],
-                "title":       t["title"],
+                "id":            t["id"],
+                "difficulty":    t["difficulty"],
+                "title":         t["title"],
                 "optimal_steps": t["optimal_steps"],
+                "optimal_cost":  t["optimal_cost"],
             }
             for t in TASKS.values()
         ]
@@ -94,6 +102,7 @@ def reset(req: ResetRequest):
     """
     Start a fresh episode for the given task_id (1, 2, or 3).
     Returns the initial observation containing the scenario description.
+    Agent must discover tables via list_tables() — not provided in reset.
     """
     try:
         obs = env.reset(task_id=req.task_id)

@@ -12,7 +12,7 @@ tags:
 # DataOnCallEnv
 
 Every data team has a 3am Slack message: *"the numbers look wrong."*  
-**DataOnCallEnv** is the first RL benchmark for the debugging workflow that follows — hypothesis, query, trace, fix — evaluated against real root causes planted in a synthetic but realistic data stack.
+**DataOnCallEnv** is an RL benchmark for the debugging workflow that follows — hypothesis, query, trace, fix — evaluated against real root causes planted in a synthetic but realistic data stack.
 
 ---
 
@@ -24,26 +24,39 @@ DataOnCallEnv fills that gap. It simulates exactly the workflow a real on-call a
 
 ---
 
+## Key Features (v2.0)
+
+| Feature | Description |
+|---------|-------------|
+| **Partial Observability** | Tables are hidden at reset. Agent must call `list_tables()` to discover what's available before inspecting or querying. |
+| **Query Cost Budget** | Each tool has a fixed cost (e.g., `run_sql`=2.0). Total budget: 20.0 per episode. Forces efficient investigation. |
+| **Realistic Logs** | Expanded dbt pipeline logs (8-15 rows per task) with noise entries + Airflow DAG run history. |
+| **Anti-Cheat** | `SELECT *` blocked, results capped at 50 rows, minimum 2 tool calls before submit, memorized-answer detection. |
+| **Tiered Evaluation** | Diagnosis scored by depth of understanding (exact/category/symptom), not binary. Investigation quality bonus. |
+
+---
+
 ## Environment description
 
-The agent receives a stakeholder Slack message describing a broken report. It has access to a SQLite database (sales, products, pipeline logs) and a set of tools to investigate. It must diagnose the root cause and propose a corrected query — without being told where the bug is.
+The agent receives a stakeholder Slack message describing a broken report. It has access to a SQLite database (sales, products, pipeline logs, Airflow runs) and a set of tools to investigate. It must diagnose the root cause and propose a corrected query — without being told where the bug is or even what tables exist.
 
-**State:** The current task scenario, tool results accumulated so far, and steps remaining.  
-**Episode:** Ends when the agent calls `submit()` or exhausts its 10-step budget.  
-**Reward:** Multi-dimensional — diagnosis accuracy, fix correctness, efficiency, reasoning quality.
+**State:** The current task scenario, tool results accumulated so far, steps remaining, cost budget remaining, and discovered tables.  
+**Episode:** Ends when the agent calls `submit()`, exhausts its 15-step budget, or spends its 20.0 cost budget.  
+**Reward:** Multi-dimensional — diagnosis accuracy (tiered), fix correctness, efficiency (steps + cost), reasoning quality, investigation methodology, minus penalties.
 
 ---
 
 ## Action space
 
-| Tool | Query format | Description |
-|------|-------------|-------------|
-| `run_sql` | SQL SELECT string | Execute a query against the broken database |
-| `inspect_schema` | Table name | See column names and types |
-| `check_logs` | *(empty)* | Read the dbt pipeline changelog |
-| `diff_report` | `"date1,date2"` | Compare report output between two dates |
-| `list_tables` | *(empty)* | List all available tables |
-| `submit` | Your answer string | Submit root cause + fix. Ends episode. |
+| Tool | Query format | Cost | Description |
+|------|-------------|------|-------------|
+| `list_tables` | *(empty)* | 0.5 | Discover all available tables (START HERE) |
+| `inspect_schema` | Table name | 1.0 | See column names and types (table must be discovered first) |
+| `check_logs` | *(empty)* | 1.0 | Read the dbt pipeline changelog |
+| `check_airflow` | *(empty)* | 1.0 | Read Airflow DAG run history |
+| `run_sql` | SQL SELECT string | 2.0 | Execute a query (no SELECT *, must specify columns) |
+| `diff_report` | `"date1,date2"` | 1.5 | Compare report output between two dates |
+| `submit` | Your answer string | 0.0 | Submit root cause + fix. Ends episode. |
 
 Optional field on every action: `reasoning` — the agent's explanation of *why* it is making this call. The grader rewards agents that explain their thinking.
 
@@ -57,7 +70,9 @@ Optional field on every action: `reasoning` — the agent's explanation of *why*
   "result": { "...tool output..." },
   "steps_taken": 3,
   "done": false,
-  "max_steps": 10
+  "max_steps": 15,
+  "cost_spent": 4.5,
+  "budget_remaining": 15.5
 }
 ```
 
@@ -68,31 +83,29 @@ Optional field on every action: `reasoning` — the agent's explanation of *why*
 ### Task 1 — Easy: Silent NULL JOIN
 **Scenario:** Weekly revenue report shows $0 for all international sales. USD sales are fine.  
 **Root cause:** `currency_rates` table stores codes as `"usd"` but `sales` table uses `"USD"`. The JOIN silently returns NULLs — no error in the pipeline logs.  
-**Expected GPT-4o score:** ~0.72  
-**Optimal steps:** 4
+**Optimal steps:** 5 | **Optimal cost:** 7.0
 
 ### Task 2 — Medium: Timezone Ghost
 **Scenario:** Monthly active users dropped 8% on February 1st. Nothing changed in the product.  
 **Root cause:** Pipeline migrated from UTC to local time on Jan 31. Events near midnight were double-counted in January and missed in February. The migration is recorded in `dbt_log`.  
-**Expected GPT-4o score:** ~0.51  
-**Optimal steps:** 6
+**Optimal steps:** 7 | **Optimal cost:** 10.0
 
 ### Task 3 — Hard: Fanout Inflation
 **Scenario:** Cloud Storage revenue is overstated by exactly 3.7x. Other product lines are fine.  
-**Root cause:** `product_promotions` table has 3–4 rows per product (non-unique key). A JOIN multiplies every sale row by the number of promo rows. Only affects products launched after a schema change.  
-**Expected GPT-4o score:** ~0.28  
-**Optimal steps:** 8
+**Root cause:** `product_promotions` table has 3–4 rows per product (non-unique key). A JOIN multiplies every sale row by the number of promo rows.  
+**Optimal steps:** 8 | **Optimal cost:** 13.0
 
 ---
 
 ## Reward function
 
 ```
-score = diagnosis_correct   (0.00–0.30)  # named the right root cause
-      + fix_valid            (0.00–0.25)  # proposed fix returns correct output
-      + efficiency           (0.00–0.20)  # fewer steps = higher score
-      + reasoning_quality    (0.00–0.15)  # fraction of actions with reasoning field
-      - false_positive_penalty (0.00–0.20) # destructive or irrelevant queries
+score = diagnosis_correct     (0.00–0.25)   # tiered: exact/category/symptom
+      + fix_valid              (0.00–0.25)   # proposed fix returns correct output
+      + efficiency             (0.00–0.15)   # step efficiency + cost efficiency
+      + reasoning_quality      (0.00–0.10)   # fraction of actions with reasoning
+      + investigation_quality  (0.00–0.10)   # logical debugging methodology
+      - false_positive_penalty (0.00–0.15)   # irrelevant tables, duplicates, cheating
 ```
 
 Reward is dense — every step contributes signal. An agent that diagnoses correctly but writes a broken fix scores ~0.55, not 0 or 1.
@@ -121,10 +134,15 @@ curl -X POST http://localhost:8000/reset \
   -H "Content-Type: application/json" \
   -d '{"task_id": 1}'
 
-# Send a tool call
+# Discover tables first (partial observability)
 curl -X POST http://localhost:8000/step \
   -H "Content-Type: application/json" \
-  -d '{"tool": "list_tables", "query": "", "reasoning": "First I will see what tables exist"}'
+  -d '{"tool": "list_tables", "query": "", "reasoning": "Need to discover what tables exist"}'
+
+# Inspect a table
+curl -X POST http://localhost:8000/step \
+  -H "Content-Type: application/json" \
+  -d '{"tool": "inspect_schema", "query": "sales", "reasoning": "Check sales table structure"}'
 ```
 
 ### Run Docker
@@ -137,22 +155,11 @@ docker run -p 7860:7860 dataoncallenv
 ### Run baseline inference
 
 ```bash
-export OPENAI_API_KEY="your_key"
-export MODEL_NAME="gpt-4o-mini"
-export API_BASE_URL="https://api.openai.com/v1"
+export HF_TOKEN="your_hf_token"
+export API_BASE_URL="https://router.huggingface.co/v1"
+export MODEL_NAME="Qwen/Qwen2.5-72B-Instruct"
 python inference.py
 ```
-
----
-
-## Baseline scores
-
-| Task | Difficulty | GPT-4o-mini | GPT-4o |
-|------|-----------|-------------|--------|
-| 1    | Easy      | 0.65        | 0.72   |
-| 2    | Medium    | 0.42        | 0.51   |
-| 3    | Hard      | 0.18        | 0.28   |
-| **avg** | —      | **0.42**    | **0.50** |
 
 ---
 
@@ -160,14 +167,15 @@ python inference.py
 
 ```
 dataoncallenv/
-├── models.py        # Pydantic types: Action, Observation, Reward
-├── database.py      # SQLite builder + tool implementations
-├── tasks.py         # Task definitions with ground truth
-├── graders.py       # Deterministic scoring functions
-├── environment.py   # Core env: reset() step() state()
+├── models.py        # Pydantic types: Action, Observation, Reward, EnvState
+├── database.py      # SQLite builder + tool implementations + anti-cheat
+├── tasks.py         # Task definitions with ground truth + diagnosis tiers
+├── graders.py       # Tiered scoring, investigation quality, penalties
+├── environment.py   # Core env: partial obs, query costs, anti-cheat
 ├── api/
 │   └── app.py       # FastAPI server
 ├── inference.py     # OpenAI agent baseline
+├── test_env.py      # Integration tests
 ├── openenv.yaml     # OpenEnv spec metadata
 ├── Dockerfile
 ├── requirements.txt
