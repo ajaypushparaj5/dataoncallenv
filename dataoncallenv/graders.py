@@ -3,9 +3,9 @@ Includes diagnosis, fix validation, efficiency, and quality scoring.
 """
 
 import re
-from models import Reward, RewardBreakdown
-from tasks import get_task
-from database import run_sql
+from .models import Reward, RewardBreakdown
+from .tasks import get_task
+from .database import run_sql
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -342,7 +342,7 @@ def _grade_task(task_id: int, conn, actions: list, final_answer: str) -> Reward:
 
     # ── 3. Efficiency (max 0.15) — combined step + cost ──
     # Calculate cost from actions
-    from environment import DataOnCallEnv
+    from .environment import DataOnCallEnv
     cost_spent = sum(DataOnCallEnv.TOOL_COSTS.get(a.get("tool", ""), 0.0) for a in actions)
     efficiency = _efficiency_score(
         len(actions), task["optimal_steps"],

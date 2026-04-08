@@ -21,4 +21,4 @@ EXPOSE 7860
 # Start the FastAPI server
 # --host 0.0.0.0 makes it accessible outside the container
 # --port 7860 matches what HF expects
-CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["uvicorn", "dataoncallenv.api.app:app", "--host", "0.0.0.0", "--port", "7860"]

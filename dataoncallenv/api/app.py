@@ -5,13 +5,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import sys, os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from models import Action, Observation, Reward, EnvState
-from environment import DataOnCallEnv
-from tasks import TASKS
+from ..models import Action, Observation, Reward, EnvState
+from ..environment import DataOnCallEnv
+from ..tasks import TASKS
 
 app = FastAPI(
     title="DataOnCallEnv",
@@ -144,3 +141,9 @@ def step(req: StepRequest):
 def state():
     """Return full current episode state."""
     return env.state()
+def main():
+    import uvicorn
+    uvicorn.run("dataoncallenv.api.app:app", host="0.0.0.0", port=7860, reload=True)
+
+if __name__ == "__main__":
+    main()
