@@ -1,7 +1,9 @@
 """Main RL Environment implementation for DataOnCallEnv.
 """
 
-from models import Action, Observation, Reward, EnvState
+import logging
+import traceback
+from models import Action, Observation, Reward, RewardBreakdown, EnvState
 from tasks import get_task
 from graders import grade
 from database import (
@@ -11,10 +13,51 @@ from database import (
 )
 import re
 
+logger = logging.getLogger(__name__)
+
+
+def _safe_observation(task_id, steps_taken, done, max_steps, cost_spent, budget_remaining, result):
+    """Build an Observation object, never raising."""
+    try:
+        return Observation(
+            task_id=task_id or 0,
+            result=result,
+            steps_taken=steps_taken,
+            done=done,
+            max_steps=max_steps,
+            cost_spent=cost_spent,
+            budget_remaining=budget_remaining,
+        )
+    except Exception:
+        return Observation(
+            task_id=0,
+            result={"result": "internal error", "success": False},
+            steps_taken=0,
+            done=True,
+            max_steps=15,
+            cost_spent=0.0,
+            budget_remaining=0.0,
+        )
+
+
+def _error_reward(msg: str = "error occurred") -> Reward:
+    """Return a safe zero-score Reward."""
+    return Reward(
+        score=0.0,
+        breakdown=RewardBreakdown(
+            diagnosis_correct=0.0,
+            fix_valid=0.0,
+            efficiency=0.0,
+            reasoning_quality=0.0,
+            investigation_quality=0.0,
+        ),
+        false_positive_penalty=0.0,
+    )
+
+
 class DataOnCallEnv:
 
     MAX_STEPS = 15
-
 
     # Configuration
     TOOL_COSTS = {
@@ -48,6 +91,11 @@ class DataOnCallEnv:
 
     def reset(self, task_id: int = 1) -> Observation:
         """Fresh episode. Rebuilds database. Returns scenario as first observation."""
+        try:
+            task_id = int(task_id)
+        except (TypeError, ValueError):
+            task_id = 1
+
         if task_id not in (1, 2, 3):
             raise ValueError(f"task_id must be 1, 2, or 3. Got {task_id}")
 
@@ -103,92 +151,154 @@ class DataOnCallEnv:
         Execute one action. Returns (observation, reward, done, info).
         reward is None until done=True.
         Enforces: partial observability, query costs, anti-cheat rules.
+
+        DEFENSIVE: never raises — always returns (obs, reward, done, info).
         """
+        # ── Top-level safety net ─────────────────────────────────────────────
+        try:
+            return self._step_impl(action)
+        except Exception as exc:
+            logger.error("Unhandled exception in step(): %s\n%s", exc, traceback.format_exc())
+            err_msg = f"Internal environment error: {exc}"
+            obs = _safe_observation(
+                task_id=self.task_id,
+                steps_taken=self.steps_taken,
+                done=True,
+                max_steps=self.MAX_STEPS,
+                cost_spent=self.cost_spent,
+                budget_remaining=max(0.0, self.COST_BUDGET - self.cost_spent),
+                result={"result": err_msg, "success": False},
+            )
+            self.done = True
+            self.last_observation = obs
+            reward = _error_reward(err_msg)
+            return obs, reward, True, {}
+
+    def _step_impl(self, action: Action):
+        """Inner step logic. All exceptions bubble to step() for safe handling."""
+
+        # ── Validate / normalise action ──────────────────────────────────────
+        # Guard against missing or invalid tool
+        tool = None
+        try:
+            tool = str(action.tool).strip() if action.tool is not None else ""
+        except Exception:
+            tool = ""
+
+        # Guard against None / non-string query
+        query = ""
+        try:
+            if action.query is not None:
+                query = str(action.query).strip()
+        except Exception:
+            query = ""
+
+        # Episode-over guard — return safe error obs, NOT raise
         if self.done:
-            raise RuntimeError("Episode over. Call reset() first.")
+            obs = _safe_observation(
+                task_id=self.task_id,
+                steps_taken=self.steps_taken,
+                done=True,
+                max_steps=self.MAX_STEPS,
+                cost_spent=self.cost_spent,
+                budget_remaining=max(0.0, self.COST_BUDGET - self.cost_spent),
+                result={"result": "Episode is already over. Call reset() to start a new episode.", "success": False},
+            )
+            return obs, _error_reward("episode already done"), True, self._make_info(True)
 
         # Validate tool name up front
-        if action.tool not in self.VALID_TOOLS:
-            obs = Observation(
+        if not tool or tool not in self.VALID_TOOLS:
+            obs = _safe_observation(
                 task_id=self.task_id,
-                result={"error": f"Unknown tool '{action.tool}'. Valid: {sorted(self.VALID_TOOLS)}"},
                 steps_taken=self.steps_taken,
                 done=False,
                 max_steps=self.MAX_STEPS,
                 cost_spent=self.cost_spent,
                 budget_remaining=self.COST_BUDGET - self.cost_spent,
+                result={"error": f"Unknown tool '{tool}'. Valid: {sorted(self.VALID_TOOLS)}"},
             )
             self.last_observation = obs
             return obs, None, False, self._make_info(False)
 
         # Anti-cheat: block early submit
-        if action.tool == "submit" and self.steps_taken < self.MIN_STEPS_BEFORE_SUBMIT:
-            obs = Observation(
+        if tool == "submit" and self.steps_taken < self.MIN_STEPS_BEFORE_SUBMIT:
+            obs = _safe_observation(
                 task_id=self.task_id,
-                result={
-                    "error": f"Cannot submit yet. You must investigate first. "
-                             f"Use at least {self.MIN_STEPS_BEFORE_SUBMIT} tools before submitting. "
-                             f"Steps taken so far: {self.steps_taken}."
-                },
                 steps_taken=self.steps_taken,
                 done=False,
                 max_steps=self.MAX_STEPS,
                 cost_spent=self.cost_spent,
                 budget_remaining=self.COST_BUDGET - self.cost_spent,
+                result={
+                    "error": (
+                        f"Cannot submit yet. You must investigate first. "
+                        f"Use at least {self.MIN_STEPS_BEFORE_SUBMIT} tools before submitting. "
+                        f"Steps taken so far: {self.steps_taken}."
+                    )
+                },
             )
             self.last_observation = obs
             return obs, None, False, self._make_info(False)
 
-
         # Cost tracking
-        tool_cost = self.TOOL_COSTS.get(action.tool, 0.0)
+        tool_cost = self.TOOL_COSTS.get(tool, 0.0)
         self.cost_spent += tool_cost
 
-        self.actions.append(action.model_dump())
+        self.actions.append(self._safe_action_dump(action, tool, query))
         self.steps_taken += 1
 
-        result = self._run_tool(action)
+        result = self._run_tool_safe(tool, query)
 
         # Check if budget (cost or steps) exhausted — auto-submit
         budget_exhausted = self.cost_spent >= self.COST_BUDGET
-        steps_exhausted = self.steps_taken >= self.MAX_STEPS
+        steps_exhausted  = self.steps_taken >= self.MAX_STEPS
 
         if (budget_exhausted or steps_exhausted) and not self.done:
             if not self.final_answer:
-                all_reasoning = " | ".join(
-                    a.get("reasoning", "") for a in self.actions if a.get("reasoning")
-                )
-                all_queries = " | ".join(
-                    a.get("query", "") for a in self.actions if a.get("tool") == "run_sql"
-                )
-                exhaust_type = "cost budget" if budget_exhausted else "step budget"
-                self.final_answer = (
-                    f"AUTO-SUBMITTED ({exhaust_type} exhausted). "
-                    f"Reasoning: {all_reasoning}. Queries run: {all_queries}"
-                )
+                try:
+                    all_reasoning = " | ".join(
+                        a.get("reasoning", "") for a in self.actions if a.get("reasoning")
+                    )
+                    all_queries = " | ".join(
+                        a.get("query", "") for a in self.actions if a.get("tool") == "run_sql"
+                    )
+                    exhaust_type = "cost budget" if budget_exhausted else "step budget"
+                    self.final_answer = (
+                        f"AUTO-SUBMITTED ({exhaust_type} exhausted). "
+                        f"Reasoning: {all_reasoning}. Queries run: {all_queries}"
+                    )
+                except Exception:
+                    self.final_answer = "AUTO-SUBMITTED (budget exhausted)"
 
-        episode_done = action.tool == "submit" or budget_exhausted or steps_exhausted
+        episode_done = tool == "submit" or budget_exhausted or steps_exhausted
         self.done = episode_done
 
-        obs = Observation(
+        obs = _safe_observation(
             task_id=self.task_id,
-            result=result,
             steps_taken=self.steps_taken,
             done=episode_done,
             max_steps=self.MAX_STEPS,
             cost_spent=self.cost_spent,
             budget_remaining=max(0.0, self.COST_BUDGET - self.cost_spent),
+            result=result,
         )
         self.last_observation = obs
 
         reward = None
         if episode_done:
-            reward = grade(
-                task_id=self.task_id,
-                conn=self.conn,
-                actions=self.actions,
-                final_answer=self.final_answer,
-            )
+            try:
+                reward = grade(
+                    task_id=self.task_id,
+                    conn=self.conn,
+                    actions=self.actions,
+                    final_answer=self.final_answer,
+                )
+                # Ensure reward is always a valid Reward object
+                if reward is None:
+                    reward = _error_reward("grade() returned None")
+            except Exception as exc:
+                logger.error("grade() raised: %s\n%s", exc, traceback.format_exc())
+                reward = _error_reward(f"grading error: {exc}")
 
         return obs, reward, episode_done, self._make_info(episode_done)
 
@@ -209,14 +319,30 @@ class DataOnCallEnv:
     # ── Info helper ───────────────────────────────────────────────────────────
 
     def _make_info(self, done: bool) -> dict:
-        return {
-            "steps_remaining":  self.MAX_STEPS - self.steps_taken,
-            "task_id":          self.task_id,
-            "done":             done,
-            "cost_spent":       self.cost_spent,
-            "budget_remaining": max(0.0, self.COST_BUDGET - self.cost_spent),
-            "discovered_tables": sorted(self.discovered_tables),
-        }
+        try:
+            return {
+                "steps_remaining":   self.MAX_STEPS - self.steps_taken,
+                "task_id":           self.task_id,
+                "done":              done,
+                "cost_spent":        self.cost_spent,
+                "budget_remaining":  max(0.0, self.COST_BUDGET - self.cost_spent),
+                "discovered_tables": sorted(self.discovered_tables),
+            }
+        except Exception:
+            return {"done": done}
+
+    # ── Safe action dump ──────────────────────────────────────────────────────
+
+    def _safe_action_dump(self, action: Action, tool: str, query: str) -> dict:
+        """Dump action to dict without crashing."""
+        try:
+            d = action.model_dump()
+            # Ensure normalised tool/query are stored
+            d["tool"]  = tool
+            d["query"] = query
+            return d
+        except Exception:
+            return {"tool": tool, "query": query, "reasoning": None}
 
     # ── Partial observability checks ──────────────────────────────────────────
 
@@ -225,6 +351,8 @@ class DataOnCallEnv:
         Check if the SQL query references any undiscovered tables.
         Returns error message if violation found, None if OK.
         """
+        if not query:
+            return None
         if not self.discovered_tables:
             return (
                 "No tables discovered yet. Call list_tables() first to discover "
@@ -232,12 +360,10 @@ class DataOnCallEnv:
             )
 
         # Extract table names from the query (simple heuristic)
-        # Look for FROM/JOIN followed by table name
         q_upper = query.upper()
         tokens = re.findall(r'(?:FROM|JOIN)\s+(\w+)', q_upper, re.IGNORECASE)
 
         for token in tokens:
-            # Check against discovered tables (case-insensitive)
             if token.lower() not in {t.lower() for t in self.discovered_tables}:
                 return (
                     f"Table '{token.lower()}' has not been discovered yet. "
@@ -248,12 +374,21 @@ class DataOnCallEnv:
 
     # ── Tool router ───────────────────────────────────────────────────────────
 
-    def _run_tool(self, action: Action):
-        tool  = action.tool
-        query = action.query.strip()
+    def _run_tool_safe(self, tool: str, query: str) -> dict:
+        """Run a tool, returning a safe dict result. Never raises."""
+        try:
+            return self._run_tool(tool, query)
+        except Exception as exc:
+            logger.error("Tool '%s' raised: %s\n%s", tool, exc, traceback.format_exc())
+            return {"error": f"Tool '{tool}' failed: {exc}", "success": False}
+
+    def _run_tool(self, tool: str, query: str) -> dict:
+        """Route a validated tool call. Raises on internal errors (caught by _run_tool_safe)."""
 
         if tool == "list_tables":
             tables = list_tables(self.conn)
+            if not isinstance(tables, list):
+                tables = []
             self.discovered_tables = set(tables)
             return {
                 "tables": tables,
@@ -261,32 +396,54 @@ class DataOnCallEnv:
             }
 
         elif tool == "inspect_schema":
-            # Partial observability: must discover tables first
+            if not query:
+                return {"error": "inspect_schema requires a table name as query."}
             if query.lower() not in {t.lower() for t in self.discovered_tables}:
                 return {
-                    "error": f"Table '{query}' not discovered yet. Call list_tables() first. "
-                             f"Discovered so far: {sorted(self.discovered_tables)}"
+                    "error": (
+                        f"Table '{query}' not discovered yet. Call list_tables() first. "
+                        f"Discovered so far: {sorted(self.discovered_tables)}"
+                    )
                 }
-            return inspect_schema(self.conn, query)
+            result = inspect_schema(self.conn, query)
+            return result if isinstance(result, dict) else {"result": str(result)}
 
         elif tool == "run_sql":
-            # Partial observability: check table access
+            if not query:
+                return {"error": "run_sql requires a SQL query string."}
             access_error = self._check_table_access(query)
             if access_error:
                 return {"error": access_error}
-            return run_sql(self.conn, query)
+            result = run_sql(self.conn, query)
+            # Ensure result is always a dict, never None
+            if result is None:
+                return {"rows": [], "message": "Query returned no results."}
+            if not isinstance(result, (dict, list)):
+                return {"result": str(result)}
+            return result
 
         elif tool == "check_logs":
-            return check_logs(self.conn)
+            result = check_logs(self.conn)
+            if result is None:
+                return {"logs": [], "message": "No logs found."}
+            return result if isinstance(result, dict) else {"result": str(result)}
 
         elif tool == "check_airflow":
-            return check_airflow(self.conn)
+            result = check_airflow(self.conn)
+            if result is None:
+                return {"runs": [], "message": "No Airflow runs found."}
+            return result if isinstance(result, dict) else {"result": str(result)}
 
         elif tool == "diff_report":
+            if not query:
+                return {"error": "diff_report requires 'date1,date2' as query."}
             parts = [p.strip() for p in query.split(",")]
             if len(parts) != 2:
                 return {"error": "diff_report query must be 'date1,date2'"}
-            return diff_report(self.conn, parts[0], parts[1])
+            result = diff_report(self.conn, parts[0], parts[1])
+            if result is None:
+                return {"diff": {}, "message": "No diff data returned."}
+            return result if isinstance(result, dict) else {"result": str(result)}
 
         elif tool == "submit":
             self.final_answer = query
@@ -294,5 +451,8 @@ class DataOnCallEnv:
                 "message": "Answer submitted. Grading now.",
                 "steps_used": self.steps_taken,
                 "cost_spent": self.cost_spent,
-                "your_answer_preview": query[:200],
+                "your_answer_preview": query[:200] if query else "(empty answer)",
             }
+
+        else:
+            return {"error": f"Unknown tool '{tool}'."}
